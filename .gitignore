@@ -1,0 +1,11 @@
+# project meta files
+.vscode/
+
+# python bytecode
+*.py[cod]
+__pycache__/
+
+# database
+index.db
+index.db-journal
+index.bak
