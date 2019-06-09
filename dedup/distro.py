@@ -5,7 +5,7 @@ import re
 import datetime
 from . import PACKAGE_PATH
 
-def make_standalone_distro(fout='dedup_standalone.py'):
+def assemble_distro(fout='dedup_standalone.py'):
   _LOCAL_IMPORT_REGEX = re.compile(r'from \..* import .*')
   _FILES = [
     '__init__.py',
@@ -40,7 +40,7 @@ def make_standalone_distro(fout='dedup_standalone.py'):
       '# This file is auto-generated, manual changes should be lost.',
       '# build date: %s.' % datetime.datetime.now(),
       '',
-      '__dist__ = "standalone"',
+      '__dist__ = "standalone"',  # magic sign for detect_env()
       '',
     ] + sorted(list(lines_import)) + lines_code + [
       '',
@@ -53,4 +53,4 @@ def make_standalone_distro(fout='dedup_standalone.py'):
     fp.flush()
 
 if __name__ == '__main__':
-  make_standalone_distro()
+  assemble_distro()

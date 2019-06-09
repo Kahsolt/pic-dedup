@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import time
 import logging
 import win32con
 import win32clipboard as cpd
@@ -71,22 +72,23 @@ class App:
     self.scheduler = Scheduler(int(os.cpu_count() * WORKER_FACTOR))   # deal with async tasks
     self.cache = LRUCache(CACHE_SIZE)   # for picture/featvec previews, etc...
 
-    self.folders = { }  # { str(fld.name): Folder }
-    self.albums = { }   # { int(fld.id): [Picture] }
-    self.pictures = { } # { int(pic.id): Picture }, flattened pool of albums
-    self.tv_info = { }  # { int(pic.id): (id, fn, hw, sz) }, info colums in self.tv
-    self.tv_view = { }  # { str(fld.id): (str(what)#['listfolder', 'simgrp', 'filter'], Object(data)) }
-    self.comp_info = { }# { str(pic1.id + pic2.id): str(info) }, compare info of two pictures
+    self.folders = { }    # { str(fld.name): Folder }
+    self.albums = { }     # { int(fld.id): [Picture] }
+    self.pictures = { }   # { int(pic.id): Picture }, flattened pool of albums
+    self.tv_info = { }    # { int(pic.id): (id, fn, hw, sz) }, info colums in self.tv
+    self.tv_view = { }    # { str(fld.id): (str(what)#['listfolder', 'simgrp', 'filter'], Object(data)) }, current tv view of folders
+    self.comp_info = { }  # { str(_tag): str(info) }, compare info of selected pictures or hue
     
     self.setup_gui()
     self.scheduler.set_stat_widgets(self.var_stat_msg, self.pb)
     self.scheduler.add_task('workspace_setup', self.workspace_, args=('setup',))
+    
     logging.debug('[%s] ready' % self.__class__.__name__)
     try:
       tk.mainloop()
     except KeyboardInterrupt:
       pass
-    self.scheduler.add_task('workspace_save', self.workspace_, args=('save',))
+    self.workspace_('save')
 
     self.cache.destroy()
     self.scheduler.stop()
@@ -115,7 +117,7 @@ class App:
       sm = tk.Menu(menu, tearoff=False)
       sm.add_command(label="Open in Explorer", command=lambda: self.fld_open_('explorer'))
       sm.add_command(label="Open in Cmd", command=lambda: self.fld_open_('cmd'))
-      sm.add_command(label="Update index", command=lambda: self.fld_reindex)
+      sm.add_command(label="Update index", command=self.fld_reindex)
       sm.add_separator()
       sm.add_command(label="Add..", command=self.fld_add)
       sm.add_command(label="Rename", command=self.fld_rename)
@@ -148,7 +150,7 @@ class App:
       sm.add_command(label="Clear cache", command=lambda: self.scheduler.add_task('cache_clear', self.cache_clear, unique=True))
       sm.add_command(label="Clear all cache", command=lambda: self.scheduler.add_task('cache_clear', self.cache_clear, args=(True,), unique=True))
       sm.add_separator()
-      sm.add_command(label="Sanitize database", command=lambda: self.scheduler.add_task('db_sanitize', sanitize_db, unique=True))
+      sm.add_command(label="Sanitize database", command=lambda: self.scheduler.add_task('db_sanitize', self.db_sanitize, unique=True))
       sm.add_command(label="Reset database", command=lambda: self.scheduler.add_task('db_reset', self.db_reset, unique=True))
       menu.add_cascade(label="Data", menu=sm)
 
@@ -333,15 +335,16 @@ class App:
         self.ls.insert(tk.END, fld.name)
     
     elif what == 'save':
-      for fld in self.folders:
-        pkl('save', fld)
+      for fld in self.folders.values():
+        if fld.sr_matrix.modified:
+          pkl('save', fld)
 
 
   @require_folder_loaded
   def _ctl_tv_listup(self, fld):
     [self.tv.delete(item) for item in self.tv.get_children()]
     
-    fid = fld.id
+    with db_lock: fid = fld.id
     what, data = None, None
     kv = self.tv_view.get(fid)
     if kv: what, data = kv
@@ -355,7 +358,8 @@ class App:
       type = 'list'
     elif what == 'simgrp':
       type = 'group'
-      
+    
+    _cnt = 0
     if len(data) == 0:
       vals = ('', "[ No appropriate picture found :( ]",)
       self.tv.insert('', 0, values=vals)
@@ -377,13 +381,17 @@ class App:
       if type == 'list':
         pics = sorted(data, reverse=True)
         _list_group(pics, '')
+        _cnt = len(pics)
       elif type == 'group':
         for i, sim_grp in enumerate(data):
           vals = ('', "[Group-%d]" % (i + 1),)
           grp = self.tv.insert('', i, values=vals, open=True)
           sim_grp = sorted(sim_grp, reverse=True)
           _list_group(sim_grp, grp)
+          _cnt += len(sim_grp)
 
+    self.var_info_msg.set('%d pictures listed' % _cnt)
+  
   def _ctl_lb_hue_(self, what='choose'):
     if what == 'choose':
       rgb, hex = tk.colorchooser.askcolor()
@@ -421,7 +429,7 @@ class App:
       self.pv.pack_forget()
 
   def _rt_indexing(self, fld):
-    fid = fld.id
+    with db_lock: fid = fld.id
     _tag = 'op_index-' + str(fld.id)
 
     def _task():
@@ -431,28 +439,26 @@ class App:
           
       logging.info('[Index] indexing %r (recursive %r)' % (fld_name, RECURSIVE_INDEX))
       index(self.scheduler, ':' + _tag, fid, dp, RECURSIVE_INDEX)
+      
+      while self.scheduler.update_progress(_tag):
+        time.sleep(SLEEP_INTERVAL)
+      pkl('load', fld)
+      logging.debug('[Index] indexing %r done' % fld_name)
 
     self.scheduler.add_task(_tag, _task, unique=True)
-    self.scheduler.wait_until_done(_tag)
-    pkl('load', fld)
 
 
   @require_folder_loaded
   def op_listfolder(self, fld):
-    fid = fld.id
-    _tag = 'op_listfolder-' + str(fid)
+    with db_lock: fid = fld.id
 
-    def _task():
-      data = self.albums.get(fid)
+    data = self.albums.get(fid)
+    self.tv_view[fid] = ('listfolder', data)
+    self._ctl_tv_listup()
     
-      self.tv_view[fid] = ('listfolder', data)
-      self._ctl_tv_listup()
-    
-    self.scheduler.add_task(_tag, _task, unique=True)
-  
   @require_folder_loaded
   def op_simgrp(self, fld):
-    fid = fld.id
+    with db_lock: fid = fld.id
     _tag = 'op_simgrp-' + str(fid)
 
     def _task():
@@ -461,13 +467,12 @@ class App:
       hwr_tolerance = self.var_hwr_tolerance.get()
       round_mask = self.var_round_mask.get()
 
-      logging.info('[SimGrp] analyzing %r with (sim_thresh %.2f, fast_search %r, round_mask %r)' 
-                  % (fld.name, sim_thresh, fast_search, round_mask))
+      logging.info('[SimGrp] analyzing %r(%r items) with (sim_thresh %.2f, fast_search %r, round_mask %r)' 
+                  % (fld.name, len(self.albums.get(fid)), sim_thresh, fast_search, round_mask))
       data = find_similar_groups(self.scheduler, ':' + _tag, self.albums.get(fid), fld.sr_matrix,
                                  sim_thresh=sim_thresh, 
                                  fast_search=fast_search, hwr_tolerance=hwr_tolerance,
                                  round_mask=round_mask)
-      pkl('save', fld)
       
       self.tv_view[fid] = ('simgrp', data)
       self._ctl_tv_listup()
@@ -476,7 +481,7 @@ class App:
 
   @require_folder_loaded
   def op_filter(self, fld):
-    fid = fld.id
+    with db_lock: fid = fld.id
     _tag = 'op_filter-' + str(fid)
 
     def _task():
@@ -486,8 +491,8 @@ class App:
       if hw_ratio: hw_ratio = HWRatio[hw_ratio].value
       hwr_tolerance = self.var_hwr_tolerance.get()
 
-      logging.info('[Filter] filtering %r with (hue %r, sim_thresh %r, hw_ratio %r, hwr_tolerance %r)'
-                  % (fld.name, hue, sim_thresh, hw_ratio, hwr_tolerance))
+      logging.info('[Filter] filtering %r(%r items) with (hue %r, sim_thresh %r, hw_ratio %r, hwr_tolerance %r)'
+                  % (fld.name, len(self.albums.get(fid)), hue, sim_thresh, hw_ratio, hwr_tolerance))
       data = filter_pictures(self.scheduler, ':' + _tag,
                              self.albums.get(fid), hue=hue, sim_thresh=sim_thresh,
                              hw_ratio=hw_ratio, hwr_tolerance=hwr_tolerance)
@@ -526,9 +531,10 @@ class App:
         if not name: name = '<unknown>'
       fld.name = name
       fld.path = dp
+      save(fld)
     elif fld.deleted:
       fld.deleted = False
-    save(fld)
+      save(fld)
     
     self._rt_indexing(fld)
     self.folders[fld.name] = fld
@@ -590,8 +596,8 @@ class App:
         _ft1e, _ft2e = p1.feature.featvec_edge, p2.feature.featvec_edge
         _ft1g, _ft2g = p1.feature.featvec_grey, p2.feature.featvec_grey
         info = "[%r, %r] sim_ratio: edge %.2f, grey %.2f/%.2f" % (
-          p1.filename,
-          p2.filename,
+          p1.filename[:24],
+          p2.filename[:24],
           _ft1e.similarity_by_avghash(_ft2e),
           _ft1g.similarity_by_avghash(_ft2g),
           _ft1g.similarity_by_absdiff(_ft2g),
@@ -713,3 +719,28 @@ class App:
     if AUTO_REINDEX:
       for fld in self.folders.values():
         self.fld_reindex(fld)
+
+  def db_sanitize(self):
+    logging.info('[DB] db_sanitize started')
+    cnt = 0
+
+    # delete ghost folder records
+    with db_lock:
+      for fld in db.query(Folder).all():
+        if not os.path.exists(fld.path):
+          cnt += 1
+          db.delete(fld)
+      db.commit()
+
+    # mark ghost picture as soft deleted
+    with db_lock:
+      _BATCH_SIZE = 5000
+      _ITER = (db.query(Picture).count() + 1) // _BATCH_SIZE
+      for i in range(_ITER):
+        for pic in db.query(Picture).offset(i * _BATCH_SIZE).limit(_BATCH_SIZE).all():
+          if not os.path.exists(pic.path):
+            cnt += 1
+            pic.deleted = True
+        db.commit()
+
+    logging.info('[DB] db_sanitize finished, %d ghost records handled' % cnt)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import logging
 import pickle
 import numpy as np
 from enum import IntEnum
@@ -12,22 +13,36 @@ __all__ = ['SimRatioMatrix', 'Feature', 'pkl', 'HWRatio', 'resize_by_hwlimit', '
 
 class SimRatioMatrix:
   
-  TYPES = 3  # 3 types of sim_ratio: edge_avghash, grey_avghash, grey_absdiff
+  TYPES_DEPTH = 3  # 3 types of sim_ratio: edge_avghash, grey_avghash, grey_absdiff
+  MASK_DEPTH = 2   # whether use round_mask
   
   def __init__(self, size):
     self.size = size
-    self.sr_mat = np.full((size, size, self.TYPES), 0.0, dtype=np.float32)
+    self.sr_mat = np.full((size, size, self.TYPES_DEPTH, self.MASK_DEPTH), 0.0, dtype=np.float32)
+    self.modified = False       # indicates pkl('save')
   
   def __setitem__(self, xy, val):
-    self.sr_mat[xy] = val
-  
+    try:
+      self.sr_mat[xy] = val
+    except IndexError:
+      self.expand(max(xy))
+      self.sr_mat[xy] = val
+    self.modified = True
+    
   def __getitem__(self, xy):
-    return self.sr_mat[xy]
+    try:
+      return self.sr_mat[xy]
+    except IndexError:
+      self.expand(max(xy))
+      self.modified = True
+      return self.sr_mat[xy]
   
   def expand(self, newsize):
     if newsize <= self.size: return
+    logging.debug("[%s] expand from %dx%d to %dx%d" 
+                  % (self.__class__.__name__, self.size, self.size, newsize, newsize))
     
-    sr_mat = np.full((newsize, newsize, self.TYPES), 0.0, dtype=np.float32)
+    sr_mat = np.full((newsize, newsize, self.TYPES_DEPTH, self.MASK_DEPTH), 0.0, dtype=np.float32)
     _sz = self.size
     sr_mat[0:_sz, 0:_sz] = self.sr_mat[0:_sz, 0:_sz]
     self.sr_mat = sr_mat
@@ -44,6 +59,7 @@ class PrincipleHues:
   
   def __init__(self, phs):
     if not isinstance(phs, list): raise TypeError
+
     self.phs = phs    # list of 3-tuples [(R, G, B)]
     self.phs_hexstr = [rgb2hexstr(ph) for ph in phs]
     
@@ -94,8 +110,14 @@ class PrincipleHues:
     return img
   
   def compability(self, hue):
-    mindist = min([rgb_distance(ph, hue) for ph in self.phs])
-    return 1 - (mindist / HUE_MAX_DISTANCE)
+    mindist = HUE_MAX_DISTANCE + 1
+    _alpha, _portion = 1.0, 0.6 / len(self.phs)
+    for ph in self.phs:
+      dist = rgb_distance(ph, hue)
+      if dist < mindist:
+        mindist, alpha = dist, _alpha
+      _alpha -= _portion
+    return (1 - (mindist / HUE_MAX_DISTANCE)) * alpha
     
 class FeatureVector:
 
@@ -109,7 +131,7 @@ class FeatureVector:
     self.fv_bin = np.array([  # FIXME: x <= mean is risky for single color image
         [0 if x == NONE_PIXEL_PADDING else (x <= _mean and 1 or -1)]
         for row in self.fv for x in row], dtype=np.int8)
-    self.fv_masked = None   # just cache, not in db
+    self.fv_masked = None     # calc and save on necessaryd
 
   @staticmethod
   def from_image(img, hw):
@@ -162,15 +184,15 @@ class FeatureVector:
           if (r - idx) ** 2 + (r - idy) ** 2 <= r ** 2:
             mfv[idx, idy] = x
       self.fv_masked = mfv
-      
+
     return FeatureVector(mfv)
 
 class Feature:
   
   def __init__(self):
-    self.principle_hues = None  # PrincipleHues
-    self.featvec_edge = None    # FeatureVector
-    self.featvec_grey = None    # FeatureVector
+    self.principle_hues = None  # instance of PrincipleHues
+    self.featvec_edge = None    # instance of  FeatureVector
+    self.featvec_grey = None
 
   @staticmethod
   def featurize(img, hw=FEATURE_VECTOR_HW, phs=PRINCIPLE_HUES):
@@ -184,8 +206,10 @@ class Feature:
     ft.principle_hues = PrincipleHues.from_image(img, phs)
     grey = img.convert('L')
     ft.featvec_grey = FeatureVector.from_image(grey, hw)
-    edge = grey.filter(ImageFilter.CONTOUR)
+    ft.featvec_grey._parent = ft  # backref of Feature
+    edge = grey.filter(ImageFilter.CONTOUR)   # .filter(ImageFilter.EDGE_ENHANCE_MORE)
     ft.featvec_edge = FeatureVector.from_image(edge, hw)
+    ft.featvec_edge._parent = ft  # backref of Feature
     return ft
   
   @staticmethod
@@ -202,17 +226,14 @@ def pkl(what='load', model=None):
   if isinstance(model, Folder):
     fld = model
     if what == 'load':
-      len_pics = fld.pictures.count()
-      if fld.sr_matrix_pkl is None:
-        fld.sr_matrix_pkl = SimRatioMatrix(len_pics).to_bytes()
+      sr_mat = fld.sr_matrix_pkl
+      if not sr_mat:
+        with db_lock: sz = int(fld.pictures.count() * 1.5)
+        sr_mat = SimRatioMatrix(sz).to_bytes()
+        fld.sr_matrix_pkl = sr_mat
         save(fld)
-      fld.sr_matrix = SimRatioMatrix.from_bytes(fld.sr_matrix_pkl)
+      fld.sr_matrix = SimRatioMatrix.from_bytes(sr_mat)
 
-      # expand the matrix if necessary (e.g. new pictures added)
-      if fld.sr_matrix.size < len_pics:
-        fld.sr_matrix.expand(len_pics)
-        fld.sr_matrix_pkl = fld.sr_matrix.to_bytes()
-        save(fld)
     elif what == 'save':
       fld.sr_matrix_pkl = fld.sr_matrix.to_bytes()
       save(fld)
@@ -220,14 +241,13 @@ def pkl(what='load', model=None):
   elif isinstance(model, Picture):
     pic = model
     if what == 'load':
-      if pic.feature_pkl is None:
-        pic.feature_pkl = Feature.featurize(pic.path)
+      ft = pic.feature_pkl
+      if not ft:
+        ft = Feature.featurize(pic.path)
+        pic.feature_pkl = ft
         save(pic)
-      pic.feature = Feature.from_bytes(pic.feature_pkl)
-    elif what == 'save':
-      pic.feature_pkl = pic.feature_pkl.to_bytes()
-      save(pic)
-      
+      pic.feature = Feature.from_bytes(ft)
+
 class HWRatio(IntEnum):
   # item named <shape>_<width>_<height>, but value is hwr = height / width
   SQUARE_1_1 =      100

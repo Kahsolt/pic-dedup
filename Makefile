@@ -1,7 +1,7 @@
 rundev:
-	DEDUP_ENV=test python dedup.py
+	python dedup.py
 
-rundist: dist
+run: dist
 	python dedup_standalone.py
 
 dist:
@@ -18,4 +18,4 @@ sql:
 	sqlite3 index.db
 
 stat:
-	@sqlite3 test/index.db "SELECT name, COUNT(*) FROM Picture JOIN Folder ON Picture.folder_id = Folder.id GROUP BY name;"
+	@sqlite3 index.db "SELECT name, COUNT(*) FROM Picture JOIN Folder ON Picture.folder_id = Folder.id GROUP BY name;"

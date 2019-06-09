@@ -2,6 +2,7 @@
 
 import os
 import logging
+import random
 import numpy as np
 import time
 import queue
@@ -90,8 +91,8 @@ class LRUCache:
         for k in sorted(cache.pool)[:_ovf]:
           cache.data.pop(k)
 
-      # approximately mapping: [0, 100+) => [30, 5]
-      next_period = int(next_period ** 2 / -400 + 31)
+      # approximately mapping: [0, 150+) => [60, 5]
+      next_period = int(_ovf ** 2 / -400 + 60)
       if next_period < 5: next_period = 5
 
 class UnionSet:
@@ -138,27 +139,38 @@ class Scheduler:
     def set(self, msg):
       logging.info('[Scheduler] %s' % msg)
   
+  class DummyProgress:
+
+    def start(self):
+      logging.info('[Scheduler] working...')
+
+    def stop(self):
+      logging.info('[Scheduler] idle...')
+  
   def __init__(self, workers=8):
     self.Q = queue.Queue()
-    self.idle = True
     self.evt_stop = threading.Event()
+    self.lock = threading.RLock()
     self.workers = [threading.Thread(
-        target=self.__class__.worker, args=(self,),
+        target=self.__class__.worker, args=(self, i),
         name='worker-%d' % (i + 1))
       for i in range(workers)]
     for worker in self.workers: worker.start()
-
+    self.idle = True
+    self.workers_idle = [True] * workers
+    
+    self.bulletin = Scheduler.DummyBulletin()   # cound be reset later, inform use certain progress of tasks
+    self.progress = Scheduler.DummyProgress()
+    
     self.task_starttime = { }                   # { str(tag): int(T) }
     self.task_pending = defaultdict(lambda: 0)  # { str(tag): int(cnt) }
     self.task_finished = defaultdict(lambda: 0) # { str(tag_aggregated): int(cnt) }
-    self.bulletin = Scheduler.DummyBulletin()   # cound be reset later, inform use certain progress of tasks
-    self.progress_bar = None
 
     logging.info('[%s] starting with %d workers' % (self.__class__.__name__, workers))
 
   def set_stat_widgets(self, bulletin, progress_bar):
     self.bulletin = bulletin
-    self.progress_bar = progress_bar
+    self.progress = progress_bar
   
   def stop(self):
     self.evt_stop.set()
@@ -171,49 +183,56 @@ class Scheduler:
       tag: single-task name, or subtask name (starts with ':')
       task: callable which calls under args
     '''
-    if self.idle: self.progress_bar.start()
+    if self.idle: self.progress.start()
     
     if not tag: tag = '_' 
     if tag in self.task_pending:
       if unique: return  # ignore on duplicate
-    elif tag:
+    elif not tag.startswith(':'):
       self.task_starttime[tag] = time.time()
       self.bulletin.set("Task %r started.." % tag)
 
     self.task_pending[tag] += 1
     self.Q.put((tag, task, args))
   
-  def wait_until_done(self, tag, tot_cnt=None):
-    time.sleep(SLEEP_INTERVAL)
+  def update_progress(self, tag, total=None):
     rest = self.task_pending.get(tag)
-    while rest:
-      if tot_cnt:
-        self.bulletin.set("Task %s finish %.2f%%." % (tag, 100 * (tot_cnt - rest) / tot_cnt))
-      time.sleep(SLEEP_INTERVAL)
+    info = total and "Task %s finish %.2f%%..." % (tag, 100 * (total - rest) / total) \
+                   or "Task %s pending %d..." % (tag, rest)
+    logging.info("[%s] %s" % (self.__class__.__name__, info))
+    self.bulletin.set(info)
+    return rest == 0
 
   def _task_done(self, tag):
-    self.task_pending[tag] -= 1
-    if not self.task_pending.get(tag):
-      self.task_pending.pop(tag)
-      T = time.time() - self.task_starttime.pop(tag)
-      self.bulletin.set("Task %s done in %.2fs." % (tag, T))
-    
-    self.task_finished['-' in tag and tag.split("-")[0] or tag] += 1
-    self.Q.task_done()
+    with self.lock:
+      self.task_pending[tag] -= 1
+      if self.task_pending.get(tag) == 0:
+        self.task_pending.pop(tag)
+        if not tag.startswith(':'):
+          T = time.time() - self.task_starttime.pop(tag)
+          self.bulletin.set("Task %s done in %.2fs." % (tag, T))
+
+      self.task_finished['-' in tag and tag.split("-")[0] or tag] += 1
+      self.Q.task_done()
     
     if not self.Q.unfinished_tasks:
-      self.progress_bar.stop()
+      self.progress.stop()
       self.idle = True
     
   def report(self):
     _nothing = 'Nothing :>'
     pending = '\n'.join([k + ': ' + str(self.task_pending[k]) for k in sorted(self.task_pending)])
     finished = '\n'.join([k + ': ' + str(self.task_finished[k]) for k in sorted(self.task_finished)])
-    info = "[Pending]\n" + (pending or _nothing) + "\n\n[Done]\n" + (finished or _nothing)
+    _cnt_idle = sum(self.workers_idle)
+    workers = ('working: ' + str(len(self.workers) - _cnt_idle) +
+               ', idle: ' + str(_cnt_idle))
+    info = ("[Workers]\n" + workers +
+            "\n\n[Pending]\n" + (pending or _nothing) +
+            "\n\n[Done]\n" + (finished or _nothing))
     return info
      
   @staticmethod
-  def worker(scheduler):
+  def worker(scheduler, i):
     logging.debug('[%s] %r started' % (scheduler.__class__.__name__, threading.current_thread().name))
     
     while not scheduler.evt_stop.is_set():
@@ -226,10 +245,11 @@ class Scheduler:
       if scheduler.evt_stop.is_set(): break
 
       # just do it!
+      scheduler.workers_idle[i] = False
       if args: task(*args)  # the start * unpacks arguments
       else: task()
-      
       scheduler._task_done(tag)
+      scheduler.workers_idle[i] = True
 
     logging.debug('[%s] %r exited' % (scheduler.__class__.__name__, threading.current_thread().name))
 
@@ -265,39 +285,51 @@ def index(scheduler, tag, fid, dp,
 
 def find_similar_groups(scheduler, tag, pics, sr_mat, 
                         sim_thresh, fast_search=True, hwr_tolerance=HWR_TOLERANCE, round_mask=False):
-  us = UnionSet(len(pics))
-  locks = [threading.RLock() for _ in range(len(pics))]    # the fucking locks
+  _N = len(pics)
+  us = UnionSet(_N)
+  locks = [threading.RLock() for _ in range(_N)]    # the fucking locks
   fv_es = [pic.feature.featvec_edge for pic in pics]
   fv_gs = [pic.feature.featvec_grey for pic in pics] if not fast_search else None
 
-  def _task(idx, xfv, idy, yfv):
+  def _task(idx, idy):
+    _d4 = round_mask and 1 or 0
     with locks[idx], locks[idy]:
-      sr = sr_mat[idx, idy, 0]
-      if not sr: sr_mat[idx, idy, 0] = sr = xfv.similarity_by_avghash(yfv)
+      if us.in_same_set(idx, idy): return   # FIXME: maybe risk in cocurrency
+      if fast_search:
+        with db_lock: hwrdiff = abs(pics[idx].hwr - pics[idy].hwr)
+        if hwrdiff > hwr_tolerance: return
+      
+      sr = sr_mat[idx, idy, 0, _d4]
+      if not sr:
+        xfv, yfv = fv_es[idx], fv_es[idy]
+        if round_mask: xfv, yfv = xfv.round_mask(), yfv.round_mask()
+        sr_mat[idx, idy, 0, round_mask] = sr = xfv.similarity_by_avghash(yfv)
       if sr >= sim_thresh: us.union(idx, idy)
       elif not fast_search:
-        sr = sr_mat[idx, idy, 1]
-        if not sr: sr_mat[idx, idy, 1] = sr = fv_gs[idx].similarity_by_avghash(fv_gs[idy])
+        sr = sr_mat[idx, idy, 1, _d4]
+        if not sr:
+          xfv, yfv = fv_gs[idx], fv_gs[idy]
+          if round_mask: xfv, yfv = xfv.round_mask(), yfv.round_mask()
+          sr_mat[idx, idy, 1, round_mask] = sr = xfv.similarity_by_avghash(yfv)
         if sr >= sim_thresh: us.union(idx, idy)
         else:
-          sr = sr_mat[idx, idy, 2]
-          if not sr: sr_mat[idx, idy, 2] = sr = fv_gs[idx].similarity_by_absdiff(fv_gs[idy])
+          sr = sr_mat[idx, idy, 2, _d4]
+          if not sr:
+            sr_mat[idx, idy, 2, _d4] = sr = xfv.similarity_by_absdiff(yfv)
           if sr >= sim_thresh: us.union(idx, idy)
+    
+  task_args = [ ]
+  for idx in range(_N - 1):
+    for idy in range(idx, _N):
+      task_args.append((idx, idy))
+  random.shuffle(task_args)
+  for args in task_args:
+    scheduler.add_task(tag, _task, args=args)
 
-  for idx, xfv in enumerate(fv_es):
-    for idy, yfv in enumerate(fv_es):
-      if idx >= idy or us.in_same_set(idx, idy): continue
-      if fast_search:
-        with db_lock:
-          hwrdiff = abs(pics[idx].hwr - pics[idy].hwr)
-        if hwrdiff > hwr_tolerance: continue
-      if round_mask: xfv, yfv = xfv.round_mask(), yfv.round_mask()
-      
-      scheduler.add_task(tag, _task, args=(idx, xfv, idy, yfv))
-  
-  _cnt = len(pics) * (len(pics) - 1) / 2
-  if not fast_search: _cnt *= 3
-  scheduler.wait_until_done(tag, _cnt)
+  _cnt = len(task_args)
+  if not fast_search: _cnt *= 2
+  while scheduler.update_progress(tag, _cnt):
+    time.sleep(SLEEP_INTERVAL)
   return [{pics[i] for i in s} for s in us.get_sets(2)]
 
 def filter_pictures(scheduler, tag, pics, 
@@ -315,5 +347,7 @@ def filter_pictures(scheduler, tag, pics,
   for pic in pics:
     scheduler.add_task(tag, _task, args=(ret, pic))
 
-  scheduler.wait_until_done(tag, len(pics))
+  _cnt = len(pics)
+  while scheduler.update_progress(tag, _cnt):
+    time.sleep(SLEEP_INTERVAL)
   return ret

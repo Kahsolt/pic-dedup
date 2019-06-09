@@ -26,6 +26,14 @@ ROUND_MASK = False
 #  2. only compare edge featvec
 FAST_SEARCH = True
 
+# image feature vector width/height
+# suggested value: 16, 32, 64
+FEATURE_VECTOR_HW = 32
+
+# principle hues count of a image
+# suggested value: 3 ~ 5
+PRINCIPLE_HUES = 4
+
 # main window size
 # suggested value: (800, 600), (912, 684), (1024, 768)
 WINDOW_SIZE = (800, 600)
@@ -38,18 +46,7 @@ PREVIEW_HW = 250
 PREVIEW_SPLIT = True
 
 
-## 1. Advanced User Settings (require db reset on modify)
-
-# image feature vector width/height
-# suggested value: 8, 16, 32
-FEATURE_VECTOR_HW = 16
-
-# principle hues count of a image
-# suggested value: 3 ~ 5
-PRINCIPLE_HUES = 4
-
-
-## 2. System Settings
+## 1. System Settings
 
 # index recursively into subfolders
 RECURSIVE_INDEX = False
@@ -65,8 +62,8 @@ FOLDER_NAME_BLACKLIST = ['image', 'images', 'manga', 'mangas', 'picture', 'pictu
 SLEEP_INTERVAL = 1.0
 
 # worker count factor (e.g. set to 2 means 2 * os.cpu_count())
-# suggested value: 2.0 ~ 6.0
-WORKER_FACTOR = 4.0
+# suggested value: 2.0 ~ 4.0
+WORKER_FACTOR = 3.0
 
 # cache size of item count
 # suggested value: 100 ~ 300
@@ -78,11 +75,8 @@ DB_FILE = None
 # auto reindex after reset db (this should take a century long..)
 AUTO_REINDEX = False
 
-# console log level
-LOG_DEBUG = False
 
-
-## 3. System Constants (hard coded with careful design, DO NOT TOUCH !!)
+## 2. System Constants (hard coded with careful design, DO NOT TOUCH !!)
 
 # padding value of non-square images
 # FIXED VALUE: 255 (pure white color pixel)
