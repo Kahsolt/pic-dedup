@@ -276,6 +276,7 @@ class App:
           tv = ttk.Treeview(frm33, show=['headings'], 
                             columns=list(cols.keys()), displaycolumns=list(cols.keys())[1:],
                             selectmode=tk.BROWSE, yscrollcommand=sb.set)
+          sb.config(command=tv.yview)
           for k, v in cols.items():
             tv.column(k, width=v[1], anchor=v[2])
             tv.heading(k, text=v[0])

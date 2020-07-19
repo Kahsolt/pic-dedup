@@ -2,6 +2,8 @@
 
 import logging
 import pickle
+import gzip
+from io import BytesIO
 import numpy as np
 from enum import IntEnum
 from PIL import Image, ImageFilter, ImageDraw, ImageFont
@@ -50,10 +52,15 @@ class SimRatioMatrix:
   
   @staticmethod
   def from_bytes(bytes):
-    return pickle.loads(bytes)
+    buf = BytesIO(bytes)
+    with gzip.GzipFile(mode='rb', fileobj=buf) as fh:
+      return pickle.loads(fh.read())
 
-  def to_bytes(self):
-    return pickle.dumps(self)
+  def to_bytes(self) -> bytes:
+    buf = BytesIO()
+    with gzip.GzipFile(mode='wb', fileobj=buf) as fh:
+      fh.write(pickle.dumps(self, protocol=4))
+    return buf.getvalue()
 
 class PrincipleHues:
   
@@ -118,19 +125,18 @@ class PrincipleHues:
         mindist, alpha = dist, _alpha
       _alpha -= _portion
     return (1 - (mindist / HUE_MAX_DISTANCE)) * alpha
-    
+
 class FeatureVector:
 
   def __init__(self, featvec):
     if not isinstance(featvec, np.ndarray): raise TypeError
     if len(featvec.shape) != 2: raise ValueError
 
-    self.fv = featvec
+    self.fv = featvec.astype(np.float16)
     self.fv_len = np.prod(self.fv.shape)  # flattened length
     _mean = np.uint8(self.fv[self.fv != NONE_PIXEL_PADDING].mean())
-    self.fv_bin = np.array([  # FIXME: x <= mean is risky for single color image
-        [0 if x == NONE_PIXEL_PADDING else (x <= _mean and 1 or -1)]
-        for row in self.fv for x in row], dtype=np.int8)
+    f = lambda x: 0 if x == NONE_PIXEL_PADDING else (x <= _mean and 1 or -1)  # FIXME: x <= mean is risky for single color image
+    self.fv_bin = np.array([[f(x) for x in row] for row in featvec], dtype=np.int8)
     self.fv_masked = None     # calc and save on necessaryd
 
   @staticmethod
@@ -145,33 +151,33 @@ class FeatureVector:
 
   def similarity_by_avghash(self, other):
     if self is other: return 1.0
-  
-    dist = 0
-    for idx, row in enumerate(self.fv_bin):
-      for idy, x in enumerate(row):
-        y = other.fv_bin[idx, idy]
-        # according to this table:
-        #    x^y -1  0  1
-        #    -1   0  1 -2
-        #     0   1  0  1
-        #     1  -2  1  0
-        if x ^ y == -2:         # one 1 and one -1
-          dist += 2
-        elif abs(x ^ y) == 1:   # one 0 and one other
-          dist += 1
+
+    #for idx, row in enumerate(self.fv_bin):
+    #  for idy, x in enumerate(row):
+    #    y = other.fv_bin[idx, idy]
+    #    # according to this table:
+    #    #    x^y -1  0  1
+    #    #    -1   0  1 -2
+    #    #     0   1  0  1
+    #    #     1  -2  1  0
+    #    if x ^ y == -2:         # one 1 and one -1
+    #      dist += 2
+    #    elif abs(x ^ y) == 1:   # one 0 (padding) and one other (pixel)
+    #      dist += 1
+    dist = abs(self.fv_bin - other.fv_bin).sum()
     return 1 - (dist / 2 / self.fv_len)
 
   def similarity_by_absdiff(self, other):
     if self is other: return 1.0
 
-    dist = 0.0
-    for idx, row in enumerate(self.fv):
-      for idy, x in enumerate(row):
-        y = other.fv[idx, idy]
-        if (x != NONE_PIXEL_PADDING) and (y != NONE_PIXEL_PADDING):
-          dist += abs(int(x) - int(y))
-        elif (x == NONE_PIXEL_PADDING) ^ (y == NONE_PIXEL_PADDING):
-          dist += 127.0
+    #for idx, row in enumerate(self.fv):
+    #  for idy, x in enumerate(row):
+    #    y = other.fv[idx, idy]
+    #    if (x != NONE_PIXEL_PADDING) and (y != NONE_PIXEL_PADDING):
+    #      dist += abs(int(x) - int(y))
+    #    elif (x == NONE_PIXEL_PADDING) ^ (y == NONE_PIXEL_PADDING):
+    #      dist += 127.0
+    dist = abs(self.fv_bin - other.fv_bin).sum()
     return 1 - (dist / 255 / self.fv_len)
   
   def round_mask(self):
@@ -191,7 +197,7 @@ class Feature:
   
   def __init__(self):
     self.principle_hues = None  # instance of PrincipleHues
-    self.featvec_edge = None    # instance of  FeatureVector
+    self.featvec_edge = None    # instance of FeatureVector
     self.featvec_grey = None
 
   @staticmethod
@@ -214,10 +220,15 @@ class Feature:
   
   @staticmethod
   def from_bytes(bytes):
-    return pickle.loads(bytes)
+    buf = BytesIO(bytes)
+    with gzip.GzipFile(mode='rb', fileobj=buf) as fh:
+      return pickle.loads(fh.read())
 
-  def to_bytes(self):
-    return pickle.dumps(self)
+  def to_bytes(self) -> bytes:
+    buf = BytesIO()
+    with gzip.GzipFile(mode='wb', fileobj=buf) as fh:
+      fh.write(pickle.dumps(self, protocol=4))
+    return buf.getvalue()
 
 def pkl(what='load', model=None):
   # auxiliary onvert function for pickled data in models
@@ -315,7 +326,6 @@ def rgb_distance(rgb1, rgb2) -> float:
 
 def high_contrast_bw_hexstr(rgb):
   return rgb2grey(rgb) <= 192 and '#FFFFFF' or '#000000'
-
 
 def hsv2rgb(hsv) -> (int, int, int):
   h, s, v = float(hsv[0] / 255.0 * 360), float(hsv[1] / 255.0), float(hsv[2] / 255.0)

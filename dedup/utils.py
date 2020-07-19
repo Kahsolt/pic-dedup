@@ -89,7 +89,7 @@ class LRUCache:
       if _ovf > 0:
         logging.debug('[%s] %d items cleaned' % (cache.__class__.__name__, _ovf))
         for k in sorted(cache.pool)[:_ovf]:
-          cache.data.pop(k)
+          cache.pool.pop(k)
 
       # approximately mapping: [0, 150+) => [60, 5]
       next_period = int(_ovf ** 2 / -400 + 60)
@@ -257,6 +257,7 @@ def index(scheduler, tag, fid, dp,
           recursive=False):
   def _task(fid, fp):  # wrap to make a callable task
     def wrapper():
+      if not os.path.exists(fp): return
       img = Image.open(fp)
       pic = Picture()
       pic.folder_id = fid

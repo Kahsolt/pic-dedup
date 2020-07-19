@@ -63,12 +63,7 @@ class Picture(Model):
     return self.size < other.size
 
 def detect_env():
-  if globals().get('__dist__') == 'standalone':
-    env = 'dist'
-  else:
-    env = 'dev'
-
-  return env
+  return globals().get('__dist__') == 'standalone' and 'dist' or 'dev'
 
 def setup_db(dbname='index.db', env='dist'):
   global db

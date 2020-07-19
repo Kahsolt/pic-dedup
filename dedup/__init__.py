@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-import os
+from os import path
 
 __version__ = '0.1'
 
-PACKAGE_PATH = os.path.dirname(os.path.abspath(__file__))
-BASE_PATH = os.path.dirname(PACKAGE_PATH)
+PACKAGE_PATH = path.dirname(path.abspath(__file__))
+BASE_PATH = path.dirname(PACKAGE_PATH)

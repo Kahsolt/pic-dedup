@@ -2,13 +2,13 @@
 
 ## 0. User Settings
 
-# sim_thresh for simgrp empirical references:
+# sim_thresh for **simgrp** empirical references:
 #  0.70 ~ 0.80: pictures that are alike in colormaps or histograms
 #  0.80 ~ 0.95: similar in hues and color-blocks, typically a picture series
 #  0.95 ~ 1.00: proximately the same picture but only differs in resolution or size
 # suggested value: 0.70 ~ 0.95
 #
-# sim_thresh for filter empirical references:
+# sim_thresh for **filter** empirical references:
 #  0.80 ~ 0.95: similiar hue presented
 #  0.95 ~ 1.00: proximately the same hue presented
 # suggested value: 0.85 ~ 0.95
@@ -27,8 +27,8 @@ ROUND_MASK = False
 FAST_SEARCH = True
 
 # image feature vector width/height
-# suggested value: 16, 32, 64
-FEATURE_VECTOR_HW = 32
+# suggested value: 8, 12, 16, 24, 32
+FEATURE_VECTOR_HW = 16
 
 # principle hues count of a image
 # suggested value: 3 ~ 5
@@ -63,7 +63,7 @@ SLEEP_INTERVAL = 1.0
 
 # worker count factor (e.g. set to 2 means 2 * os.cpu_count())
 # suggested value: 2.0 ~ 4.0
-WORKER_FACTOR = 3.0
+WORKER_FACTOR = 2.0
 
 # cache size of item count
 # suggested value: 100 ~ 300
