@@ -48,6 +48,9 @@ PREVIEW_SPLIT = True
 
 ## 1. System Settings
 
+# bulk commit after every certain actions 
+DB_COMMIT_TTL = 300
+
 # index recursively into subfolders
 RECURSIVE_INDEX = False
 

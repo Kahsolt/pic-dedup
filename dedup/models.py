@@ -13,6 +13,7 @@ from .settings import *
 __all__  = ['db', 'db_lock', 'Folder', 'Picture', 'save']
 
 db = None
+db_ttl = DB_COMMIT_TTL
 db_lock = threading.RLock()
 Model = declarative_base()
 
@@ -26,7 +27,6 @@ class Folder(Model):
 
   path = sql.Column(sql.TEXT, unique=True, comment='absolute path')
   name = sql.Column(sql.TEXT, comment='folder basename or distinguishable human readable name')
-  deleted = sql.Column(sql.BOOLEAN, default=False, comment='soft delete mark')
 
   sr_matrix_pkl = sql.Column(sql.BLOB, default=None, comment='pickled sim_ratio matrix')
   sr_matrix = None  # instance of np.ndarray, loaded from sr_matrix_pkl
@@ -44,7 +44,7 @@ class Picture(Model):
   folder_id = sql.Column(sql.ForeignKey('Folder.id', onupdate='CASCADE', ondelete='CASCADE'))
   folder = relationship('Folder', back_populates='pictures')
 
-  path = sql.Column(sql.TEXT, comment='absolute path')
+  path = sql.Column(sql.TEXT, comment='relative path from its Folder')
   filename = sql.Column(sql.TEXT, comment='file basename')
   width = sql.Column(sql.INT)
   height = sql.Column(sql.INT)
@@ -95,10 +95,16 @@ def setup_db(dbname='index.db', env='dist'):
       save(fld)
 
 def save(model=None):
+  global db_ttl
   with db_lock:
-    if model: db.add(model)
-    try: db.commit()
-    except Exception as e: logging.error(e)
+    if model is None: db_ttl = 0  # later force commit
+    else:
+      db.add(model)
+      db_ttl -= 1
+      if db_ttl <= 0:
+        db_ttl = DB_COMMIT_TTL    # reset TTL
+        try: db.commit()
+        except Exception as e: logging.error(e)
 
 # global initialize
 _env = detect_env()
